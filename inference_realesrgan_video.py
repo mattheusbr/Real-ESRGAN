@@ -8,7 +8,10 @@ import shutil
 import subprocess
 import torch
 from basicsr.archs.rrdbnet_arch import RRDBNet
+<<<<<<< HEAD
 from basicsr.utils.download_util import load_file_from_url
+=======
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
 from os import path as osp
 from tqdm import tqdm
 
@@ -75,6 +78,7 @@ class Reader:
             self.input_fps = meta['fps']
             self.audio = meta['audio']
             self.nb_frames = meta['nb_frames']
+<<<<<<< HEAD
 
         else:
             if self.input_type.startswith('image'):
@@ -349,13 +353,150 @@ def get_frames(args, extract_frames=False):
     else:
         files = sorted(glob.glob(os.path.join(args.input, '*')))
         assert len(files) > 0, 'the input folder is empty'
+=======
 
-    if args.fps is None:
-        args.fps = 24
+        else:
+            if self.input_type.startswith('image'):
+                self.paths = [args.input]
+            else:
+                paths = sorted(glob.glob(os.path.join(args.input, '*')))
+                tot_frames = len(paths)
+                num_frame_per_worker = tot_frames // total_workers + (1 if tot_frames % total_workers else 0)
+                self.paths = paths[num_frame_per_worker * worker_idx:num_frame_per_worker * (worker_idx + 1)]
 
+            self.nb_frames = len(self.paths)
+            assert self.nb_frames > 0, 'empty folder'
+            from PIL import Image
+            tmp_img = Image.open(self.paths[0])
+            self.width, self.height = tmp_img.size
+        self.idx = 0
+
+    def get_resolution(self):
+        return self.height, self.width
+
+    def get_fps(self):
+        if self.args.fps is not None:
+            return self.args.fps
+        elif self.input_fps is not None:
+            return self.input_fps
+        return 24
+
+    def get_audio(self):
+        return self.audio
+
+    def __len__(self):
+        return self.nb_frames
+
+    def get_frame_from_stream(self):
+        img_bytes = self.stream_reader.stdout.read(self.width * self.height * 3)  # 3 bytes for one pixel
+        if not img_bytes:
+            return None
+        img = np.frombuffer(img_bytes, np.uint8).reshape([self.height, self.width, 3])
+        return img
+
+    def get_frame_from_list(self):
+        if self.idx >= self.nb_frames:
+            return None
+        img = cv2.imread(self.paths[self.idx])
+        self.idx += 1
+        return img
+
+    def get_frame(self):
+        if self.input_type.startswith('video'):
+            return self.get_frame_from_stream()
+        else:
+            return self.get_frame_from_list()
+
+    def close(self):
+        if self.input_type.startswith('video'):
+            self.stream_reader.stdin.close()
+            self.stream_reader.wait()
+
+
+class Writer:
+
+    def __init__(self, args, audio, height, width, video_save_path, fps):
+        out_width, out_height = int(width * args.outscale), int(height * args.outscale)
+        if out_height > 2160:
+            print('You are generating video that is larger than 4K, which will be very slow due to IO speed.',
+                  'We highly recommend to decrease the outscale(aka, -s).')
+
+        if audio is not None:
+            self.stream_writer = (
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}',
+                             framerate=fps).output(
+                                 audio,
+                                 video_save_path,
+                                 pix_fmt='yuv420p',
+                                 vcodec='libx264',
+                                 loglevel='error',
+                                 acodec='copy').overwrite_output().run_async(
+                                     pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+        else:
+            self.stream_writer = (
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}',
+                             framerate=fps).output(
+                                 video_save_path, pix_fmt='yuv420p', vcodec='libx264',
+                                 loglevel='error').overwrite_output().run_async(
+                                     pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+
+    def write_frame(self, frame):
+        frame = frame.astype(np.uint8).tobytes()
+        self.stream_writer.stdin.write(frame)
+
+    def close(self):
+        self.stream_writer.stdin.close()
+        self.stream_writer.wait()
+
+
+def inference_video(args, video_save_path, device=None, total_workers=1, worker_idx=0):
+    # ---------------------- determine models according to model names ---------------------- #
+    args.model_name = args.model_name.split('.pth')[0]
+    if args.model_name in ['RealESRGAN_x4plus', 'RealESRNet_x4plus']:  # x4 RRDBNet model
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+        netscale = 4
+    elif args.model_name in ['RealESRGAN_x4plus_anime_6B']:  # x4 RRDBNet model with 6 blocks
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
+        netscale = 4
+    elif args.model_name in ['RealESRGAN_x2plus']:  # x2 RRDBNet model
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+        netscale = 2
+    elif args.model_name in ['realesr-animevideov3']:  # x4 VGG-style model (XS size)
+        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu')
+        netscale = 4
+    else:
+        raise NotImplementedError
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
+
+    # ---------------------- determine model paths ---------------------- #
+    model_path = os.path.join('experiments/pretrained_models', args.model_name + '.pth')
+    if not os.path.isfile(model_path):
+        model_path = os.path.join('realesrgan/weights', args.model_name + '.pth')
+    if not os.path.isfile(model_path):
+        raise ValueError(f'Model {args.model_name} does not exist.')
+
+<<<<<<< HEAD
     return is_video, files
+=======
+    # restorer
+    upsampler = RealESRGANer(
+        scale=netscale,
+        model_path=model_path,
+        model=model,
+        tile=args.tile,
+        tile_pad=args.tile_pad,
+        pre_pad=args.pre_pad,
+        half=not args.fp32,
+        device=device,
+    )
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
 
+    if 'anime' in args.model_name and args.face_enhance:
+        print('face_enhance is not supported in anime models, we turned this option off for you. '
+              'if you insist on turning it on, please manually comment the relevant lines of code.')
+        args.face_enhance = False
 
+<<<<<<< HEAD
 def inference_stream(args, upsampler, face_enhancer):
     try:
         import ffmpeg
@@ -376,12 +517,20 @@ def inference_stream(args, upsampler, face_enhancer):
         decoder = (
             ffmpeg.input(args.input).output('pipe:', format='rawvideo', pix_fmt='rgb24', loglevel='warning').run_async(
                 pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+=======
+    if args.face_enhance:  # Use GFPGAN for face enhancement
+        from gfpgan import GFPGANer
+        face_enhancer = GFPGANer(
+            model_path='https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth',
+            upscale=args.outscale,
+            arch='clean',
+            channel_multiplier=2,
+            bg_upsampler=upsampler)  # TODO support custom device
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
     else:
-        from PIL import Image
-        tmp_img = Image.open(paths[0])
-        width, height = tmp_img.size
-        idx = 0
+        face_enhancer = None
 
+<<<<<<< HEAD
     out_width, out_height = int(width * args.outscale), int(height * args.outscale)
     if out_height > 2160:
         print('You are generating video that is larger than 4K, which will be very slow due to IO speed.',
@@ -401,8 +550,17 @@ def inference_stream(args, upsampler, face_enhancer):
                 framerate=args.fps).output(video_save_path, pix_fmt='yuv420p', vcodec='libx264',
                                            loglevel='info').overwrite_output().run_async(
                                                pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+=======
+    reader = Reader(args, total_workers, worker_idx)
+    audio = reader.get_audio()
+    height, width = reader.get_resolution()
+    fps = reader.get_fps()
+    writer = Writer(args, audio, height, width, video_save_path, fps)
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
 
+    pbar = tqdm(total=len(reader), unit='frame', desc='inference')
     while True:
+<<<<<<< HEAD
         if is_video:
             img_bytes = decoder.stdout.read(width * height * 3)
             if not img_bytes:
@@ -413,6 +571,11 @@ def inference_stream(args, upsampler, face_enhancer):
                 break
             img = cv2.imread(paths[idx])
             idx += 1
+=======
+        img = reader.get_frame()
+        if img is None:
+            break
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
 
         try:
             if args.face_enhance:
@@ -423,6 +586,7 @@ def inference_stream(args, upsampler, face_enhancer):
             print('Error', error)
             print('If you encounter CUDA out of memory, try to set --tile with a smaller number.')
         else:
+<<<<<<< HEAD
             output = output.astype(np.uint8).tobytes()
             encoder.stdin.write(output)
 
@@ -447,6 +611,62 @@ def inference_frames(args, upsampler, face_enhancer):
 
     if args.extract_frame_first and osp.exists(osp.join(args.output, f'{args.video_name}_inp_tmp_frames')):
         shutil.rmtree(osp.join(args.output, f'{args.video_name}_inp_tmp_frames'))
+=======
+            writer.write_frame(output)
+
+        torch.cuda.synchronize(device)
+        pbar.update(1)
+
+    reader.close()
+    writer.close()
+
+
+def run(args):
+    args.video_name = osp.splitext(os.path.basename(args.input))[0]
+    video_save_path = osp.join(args.output, f'{args.video_name}_{args.suffix}.mp4')
+
+    if args.extract_frame_first:
+        tmp_frames_folder = osp.join(args.output, f'{args.video_name}_inp_tmp_frames')
+        os.makedirs(tmp_frames_folder, exist_ok=True)
+        os.system(f'ffmpeg -i {args.input} -qscale:v 1 -qmin 1 -qmax 1 -vsync 0  {tmp_frames_folder}/frame%08d.png')
+        args.input = tmp_frames_folder
+
+    num_gpus = torch.cuda.device_count()
+    num_process = num_gpus * args.num_process_per_gpu
+    if num_process == 1:
+        inference_video(args, video_save_path)
+        return
+
+    ctx = torch.multiprocessing.get_context('spawn')
+    pool = ctx.Pool(num_process)
+    os.makedirs(osp.join(args.output, f'{args.video_name}_out_tmp_videos'), exist_ok=True)
+    pbar = tqdm(total=num_process, unit='sub_video', desc='inference')
+    for i in range(num_process):
+        sub_video_save_path = osp.join(args.output, f'{args.video_name}_out_tmp_videos', f'{i:03d}.mp4')
+        pool.apply_async(
+            inference_video,
+            args=(args, sub_video_save_path, torch.device(i % num_gpus), num_process, i),
+            callback=lambda arg: pbar.update(1))
+    pool.close()
+    pool.join()
+
+    # combine sub videos
+    # prepare vidlist.txt
+    with open(f'{args.output}/{args.video_name}_vidlist.txt', 'w') as f:
+        for i in range(num_process):
+            f.write(f'file \'{args.video_name}_out_tmp_videos/{i:03d}.mp4\'\n')
+
+    cmd = [
+        args.ffmpeg_bin, '-f', 'concat', '-safe', '0', '-i', f'{args.output}/{args.video_name}_vidlist.txt', '-c',
+        'copy', f'{video_save_path}'
+    ]
+    print(' '.join(cmd))
+    subprocess.call(cmd)
+    shutil.rmtree(osp.join(args.output, f'{args.video_name}_out_tmp_videos'))
+    if osp.exists(osp.join(args.output, f'{args.video_name}_inp_tmp_videos')):
+        shutil.rmtree(osp.join(args.output, f'{args.video_name}_inp_tmp_videos'))
+    os.remove(f'{args.output}/{args.video_name}_vidlist.txt')
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
 
 
 def main():
@@ -479,10 +699,15 @@ def main():
     parser.add_argument(
         '--fp32', action='store_true', help='Use fp32 precision during inference. Default: fp16 (half precision).')
     parser.add_argument('--fps', type=float, default=None, help='FPS of the output video')
+<<<<<<< HEAD
     parser.add_argument('--consumer', type=int, default=4, help='Number of IO consumers')
     parser.add_argument('--stream', action='store_true', help='Stream frames directly to ffmpeg instead of storing large temporary files.')
     parser.add_argument('--ffmpeg_bin', type=str, default='ffmpeg', help='The path to ffmpeg')
     parser.add_argument('--extract_frame_first', action='store_true', help='Extract frames before multi-processing to avoid ffmpeg issues.')
+=======
+    parser.add_argument('--ffmpeg_bin', type=str, default='ffmpeg', help='The path to ffmpeg')
+    parser.add_argument('--extract_frame_first', action='store_true')
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
     parser.add_argument('--num_process_per_gpu', type=int, default=1)
 
     parser.add_argument(
@@ -500,6 +725,7 @@ def main():
     args.input = args.input.rstrip('/').rstrip('\\')
     os.makedirs(args.output, exist_ok=True)
 
+<<<<<<< HEAD
     args.model_name = args.model_name.split('.pth')[0]
     if args.model_name == 'RealESRGAN_x4plus':
         model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
@@ -572,8 +798,21 @@ def main():
 
     if args.stream:
         inference_stream(args, upsampler, face_enhancer)
+=======
+    if mimetypes.guess_type(args.input)[0] is not None and mimetypes.guess_type(args.input)[0].startswith('video'):
+        is_video = True
+>>>>>>> 8cb9bd4 (fix colorspace bug & support multi-gpu and multi-processing (#312))
     else:
-        inference_frames(args, upsampler, face_enhancer)
+        is_video = False
+
+    if args.extract_frame_first and not is_video:
+        args.extract_frame_first = False
+
+    run(args)
+
+    if args.extract_frame_first:
+        tmp_frames_folder = osp.join(args.output, f'{args.video_name}_inp_tmp_frames')
+        shutil.rmtree(tmp_frames_folder)
 
 
 if __name__ == '__main__':
