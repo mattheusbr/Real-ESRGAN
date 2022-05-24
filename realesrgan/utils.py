@@ -53,6 +53,7 @@ class RealESRGANer():
 
         if isinstance(model_path, list):
             # dni
+            assert dni_weight is not None, 'dni_weight must be provided when model_path is a list.'
             assert len(model_path) == len(dni_weight), 'model_path and dni_weight should have the save length.'
             loadnet = self.dni(model_path[0], model_path[1], dni_weight)
         else:
